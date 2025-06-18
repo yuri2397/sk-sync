@@ -22,7 +22,7 @@ class LocalSyncController extends Controller
                     sage_id, code, company_name, contact_name, email, phone, address,
                     payment_delay, currency, credit_limit, max_days_overdue, 
                     risk_level, notes, is_active
-                FROM sync_customers 
+                FROM anonymes_customers 
                 WHERE synced = 0 OR synced IS NULL
                 ORDER BY created_at
             ", [$limit]);
@@ -32,7 +32,6 @@ class LocalSyncController extends Controller
                 'data' => $customers,
                 'count' => count($customers)
             ]);
-
         } catch (Exception $e) {
             Log::error('Erreur récupération clients: ' . $e->getMessage());
 
@@ -45,53 +44,67 @@ class LocalSyncController extends Controller
     }
 
     /**
-     * Récupérer les factures non synchronisées avec leurs échéances
+     * Récupérer les échéances groupées par facture (invoice_number = DO_Ref)
      */
     public function getInvoices(Request $request)
     {
         try {
-            $limit = $request->input('limit', 50);
+            $limit = $request->input('limit', 100);
 
-            // Récupérer les factures avec leurs échéances
-            $invoices = DB::select("
-                SELECT TOP (?) 
-                    i.sage_id, i.invoice_number, i.customer_sage_id, i.reference, i.type,
-                    i.invoice_date, i.currency, i.total_amount, i.notes, i.created_by,
-                    -- Sous-requête pour récupérer les échéances au format JSON
+            // Récupérer les échéances groupées par numéro de facture (DO_Ref)
+            $invoiceGroups = DB::select("
+                SELECT DISTINCT TOP (?)
+                    invoice_number,  -- DO_Ref (numéro facture commun)
+                    customer_sage_id,
+                    MIN(invoice_date) as invoice_date,
+                    currency,
+                    SUM(total_amount) as total_amount,
+                    MIN(created_by) as created_by,
+                    -- Récupérer toutes les échéances pour cette facture
                     (
                         SELECT 
-                            FORMAT(dd.due_date, 'yyyy-MM-dd') AS due_date,
-                            dd.amount
-                        FROM sync_due_dates dd 
-                        WHERE dd.invoice_sage_id = i.sage_id
-                          AND (dd.synced = 0 OR dd.synced IS NULL)
-                        ORDER BY dd.due_date
+                            sage_id,           -- DO_Piece (ID unique échéance)
+                            reference,         -- DO_Piece aussi
+                            FORMAT(invoice_date, 'yyyy-MM-dd') AS due_date,
+                            total_amount as amount,
+                            type
+                        FROM anonymes_invoices i2 
+                        WHERE i2.invoice_number = i1.invoice_number
+                          AND i2.customer_sage_id = i1.customer_sage_id
+                          AND (i2.synced = 0 OR i2.synced IS NULL)
+                        ORDER BY i2.invoice_date
                         FOR JSON PATH
                     ) AS due_dates_json
-                FROM sync_invoices i
-                WHERE (i.synced = 0 OR i.synced IS NULL)
-                  AND EXISTS (
-                      SELECT 1 FROM sync_due_dates dd 
-                      WHERE dd.invoice_sage_id = i.sage_id 
-                        AND (dd.synced = 0 OR dd.synced IS NULL)
-                  )
-                ORDER BY i.created_at
+                FROM anonymes_invoices i1
+                WHERE (synced = 0 OR synced IS NULL)
+                  AND invoice_number IS NOT NULL
+                  AND invoice_number <> ''
+                GROUP BY invoice_number, customer_sage_id, currency
+                ORDER BY MIN(created_at)
             ", [$limit]);
 
-            // Formater les données pour inclure les échéances parsées
-            $formattedInvoices = array_map(function($invoice) {
-                $invoice->due_dates = $invoice->due_dates_json ?
-                    json_decode($invoice->due_dates_json, true) : [];
-                unset($invoice->due_dates_json);
-                return $invoice;
-            }, $invoices);
+            // Formater les données pour créer une facture avec ses échéances
+            $formattedInvoices = array_map(function ($group) {
+                $due_dates = $group->due_dates_json ?
+                    json_decode($group->due_dates_json, true) : [];
+
+                return [
+                    'invoice_number' => $group->invoice_number,  // Numéro facture commun
+                    'customer_sage_id' => $group->customer_sage_id,
+                    'invoice_date' => $group->invoice_date,
+                    'currency' => $group->currency,
+                    'total_amount' => $group->total_amount,      // Somme de toutes les échéances
+                    'created_by' => $group->created_by,
+                    'type' => 'invoice',                         // C'est une facture dans l'app
+                    'due_dates' => $due_dates                    // Liste des échéances
+                ];
+            }, $invoiceGroups);
 
             return response()->json([
                 'success' => true,
                 'data' => $formattedInvoices,
                 'count' => count($formattedInvoices)
             ]);
-
         } catch (Exception $e) {
             Log::error('Erreur récupération factures: ' . $e->getMessage());
 
@@ -122,7 +135,7 @@ class LocalSyncController extends Controller
             $placeholders = str_repeat('?,', count($customerIds) - 1) . '?';
 
             $affected = DB::update("
-                UPDATE sync_customers 
+                UPDATE anonymes_customers 
                 SET synced = 1, sync_date = GETDATE() 
                 WHERE sage_id IN ($placeholders)
             ", $customerIds);
@@ -132,7 +145,6 @@ class LocalSyncController extends Controller
                 'message' => "Clients marqués comme synchronisés",
                 'affected' => $affected
             ]);
-
         } catch (Exception $e) {
             Log::error('Erreur marquage clients synchronisés: ' . $e->getMessage());
 
@@ -145,50 +157,41 @@ class LocalSyncController extends Controller
     }
 
     /**
-     * Marquer les factures et échéances comme synchronisées
+     * Marquer les échéances comme synchronisées par numéro de facture
      */
     public function markInvoicesSynced(Request $request)
     {
         try {
-            $invoiceIds = $request->input('invoice_ids', []);
+            $invoiceNumbers = $request->input('invoice_numbers', []);
 
-            if (empty($invoiceIds)) {
+            if (empty($invoiceNumbers)) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Aucun ID de facture fourni'
+                    'message' => 'Aucun numéro de facture fourni'
                 ], 400);
             }
 
             // Construire la requête avec des paramètres sûrs
-            $placeholders = str_repeat('?,', count($invoiceIds) - 1) . '?';
+            $placeholders = str_repeat('?,', count($invoiceNumbers) - 1) . '?';
 
-            // Marquer les factures comme synchronisées
-            $affectedInvoices = DB::update("
-                UPDATE sync_invoices 
+            // Marquer toutes les échéances de ces factures comme synchronisées
+            $affected = DB::update("
+                UPDATE anonymes_invoices 
                 SET synced = 1, sync_date = GETDATE() 
-                WHERE sage_id IN ($placeholders)
-            ", $invoiceIds);
-
-            // Marquer les échéances comme synchronisées
-            $affectedDueDates = DB::update("
-                UPDATE sync_due_dates 
-                SET synced = 1, sync_date = GETDATE() 
-                WHERE invoice_sage_id IN ($placeholders)
-            ", $invoiceIds);
+                WHERE invoice_number IN ($placeholders)
+            ", $invoiceNumbers);
 
             return response()->json([
                 'success' => true,
-                'message' => "Factures et échéances marquées comme synchronisées",
-                'affected_invoices' => $affectedInvoices,
-                'affected_due_dates' => $affectedDueDates
+                'message' => "Échéances marquées comme synchronisées",
+                'affected' => $affected
             ]);
-
         } catch (Exception $e) {
-            Log::error('Erreur marquage factures synchronisées: ' . $e->getMessage());
+            Log::error('Erreur marquage échéances synchronisées: ' . $e->getMessage());
 
             return response()->json([
                 'success' => false,
-                'message' => 'Erreur lors du marquage des factures',
+                'message' => 'Erreur lors du marquage des échéances',
                 'error' => $e->getMessage()
             ], 500);
         }
@@ -211,7 +214,6 @@ class LocalSyncController extends Controller
                 'message' => 'Données mises à jour depuis Sage',
                 'stats' => $stats
             ]);
-
         } catch (Exception $e) {
             Log::error('Erreur refresh depuis Sage: ' . $e->getMessage());
 
@@ -235,7 +237,6 @@ class LocalSyncController extends Controller
                 'success' => true,
                 'stats' => $stats
             ]);
-
         } catch (Exception $e) {
             Log::error('Erreur récupération stats: ' . $e->getMessage());
 
@@ -261,7 +262,6 @@ class LocalSyncController extends Controller
                 'message' => 'Service local de synchronisation opérationnel',
                 'timestamp' => now()->toIso8601String()
             ]);
-
         } catch (Exception $e) {
             return response()->json([
                 'success' => false,
@@ -278,16 +278,16 @@ class LocalSyncController extends Controller
     {
         $stats = DB::select("
             SELECT 
-                (SELECT COUNT(*) FROM sync_customers) AS total_customers,
-                (SELECT COUNT(*) FROM sync_customers WHERE synced = 1) AS customers_synced,
-                (SELECT COUNT(*) FROM sync_customers WHERE synced = 0 OR synced IS NULL) AS customers_pending,
-                (SELECT COUNT(*) FROM sync_invoices) AS total_invoices,
-                (SELECT COUNT(*) FROM sync_invoices WHERE synced = 1) AS invoices_synced,
-                (SELECT COUNT(*) FROM sync_invoices WHERE synced = 0 OR synced IS NULL) AS invoices_pending,
-                (SELECT COUNT(*) FROM sync_due_dates) AS total_due_dates,
-                (SELECT COUNT(*) FROM sync_due_dates WHERE synced = 1) AS due_dates_synced,
-                (SELECT COUNT(*) FROM sync_due_dates WHERE synced = 0 OR synced IS NULL) AS due_dates_pending,
-                (SELECT SUM(total_amount) FROM sync_invoices WHERE synced = 0 OR synced IS NULL) AS pending_amount
+                (SELECT COUNT(*) FROM anonymes_customers) AS total_customers,
+                (SELECT COUNT(*) FROM anonymes_customers WHERE synced = 1) AS customers_synced,
+                (SELECT COUNT(*) FROM anonymes_customers WHERE synced = 0 OR synced IS NULL) AS customers_pending,
+                (SELECT COUNT(DISTINCT invoice_number) FROM anonymes_invoices WHERE invoice_number IS NOT NULL AND invoice_number <> '') AS total_invoices,
+                (SELECT COUNT(DISTINCT invoice_number) FROM anonymes_invoices WHERE synced = 1 AND invoice_number IS NOT NULL AND invoice_number <> '') AS invoices_synced,
+                (SELECT COUNT(DISTINCT invoice_number) FROM anonymes_invoices WHERE (synced = 0 OR synced IS NULL) AND invoice_number IS NOT NULL AND invoice_number <> '') AS invoices_pending,
+                (SELECT COUNT(*) FROM anonymes_invoices) AS total_echeances,
+                (SELECT COUNT(*) FROM anonymes_invoices WHERE synced = 1) AS echeances_synced,
+                (SELECT COUNT(*) FROM anonymes_invoices WHERE synced = 0 OR synced IS NULL) AS echeances_pending,
+                (SELECT SUM(total_amount) FROM anonymes_invoices WHERE synced = 0 OR synced IS NULL) AS pending_amount
         ");
 
         return $stats[0];
