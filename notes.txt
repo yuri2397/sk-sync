@@ -1,0 +1,264 @@
+-- Tables tampons pour la synchronisation avec l'app recouvrement
+-- À exécuter dans votre base MSSQL Sage 100
+
+-- Table tampon pour les clients
+CREATE TABLE sync_customers (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    sage_id NVARCHAR(50) NOT NULL,
+    code NVARCHAR(50),
+    company_name NVARCHAR(255),
+    contact_name NVARCHAR(255),
+    email NVARCHAR(255),
+    phone NVARCHAR(50),
+    address NVARCHAR(MAX),
+    payment_delay INT DEFAULT 30,
+    currency NVARCHAR(3) DEFAULT 'XOF',
+    credit_limit DECIMAL(15,2),
+    max_days_overdue INT DEFAULT 30,
+    risk_level NVARCHAR(20) DEFAULT 'low',
+    notes NVARCHAR(MAX),
+    is_active BIT DEFAULT 1,
+    synced BIT DEFAULT 0,
+    sync_date DATETIME2,
+    created_at DATETIME2 DEFAULT GETDATE(),
+    updated_at DATETIME2 DEFAULT GETDATE()
+);
+
+-- Table tampon pour les factures
+CREATE TABLE sync_invoices (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    sage_id NVARCHAR(50) NOT NULL,
+    invoice_number NVARCHAR(100) NOT NULL,
+    customer_sage_id NVARCHAR(50) NOT NULL,
+    reference NVARCHAR(255),
+    type NVARCHAR(50) DEFAULT 'invoice',
+    invoice_date DATE NOT NULL,
+    currency NVARCHAR(3) DEFAULT 'XOF',
+    total_amount DECIMAL(15,2) NOT NULL,
+    notes NVARCHAR(MAX),
+    created_by NVARCHAR(255),
+    synced BIT DEFAULT 0,
+    sync_date DATETIME2,
+    created_at DATETIME2 DEFAULT GETDATE(),
+    updated_at DATETIME2 DEFAULT GETDATE()
+);
+
+-- Table tampon pour les échéances
+CREATE TABLE sync_due_dates (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    invoice_sage_id NVARCHAR(50) NOT NULL,
+    due_date DATE NOT NULL,
+    amount DECIMAL(15,2) NOT NULL,
+    synced BIT DEFAULT 0,
+    sync_date DATETIME2,
+    created_at DATETIME2 DEFAULT GETDATE(),
+    updated_at DATETIME2 DEFAULT GETDATE()
+);
+
+-- Index pour optimiser les performances
+CREATE INDEX IX_sync_customers_sage_id ON sync_customers(sage_id);
+CREATE INDEX IX_sync_customers_synced ON sync_customers(synced);
+CREATE INDEX IX_sync_invoices_sage_id ON sync_invoices(sage_id);
+CREATE INDEX IX_sync_invoices_synced ON sync_invoices(synced);
+CREATE INDEX IX_sync_invoices_customer ON sync_invoices(customer_sage_id);
+CREATE INDEX IX_sync_due_dates_invoice ON sync_due_dates(invoice_sage_id);
+CREATE INDEX IX_sync_due_dates_synced ON sync_due_dates(synced);
+
+-- Trigger pour mettre à jour updated_at automatiquement
+CREATE TRIGGER tr_sync_customers_updated_at
+ON sync_customers
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE sync_customers
+    SET updated_at = GETDATE()
+    WHERE sage_id IN (SELECT sage_id FROM inserted);
+END;
+
+CREATE TRIGGER tr_sync_invoices_updated_at
+ON sync_invoices
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE sync_invoices
+    SET updated_at = GETDATE()
+    WHERE sage_id IN (SELECT sage_id FROM inserted);
+END;
+
+CREATE TRIGGER tr_sync_due_dates_updated_at
+ON sync_due_dates
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE sync_due_dates
+    SET updated_at = GETDATE()
+    WHERE id IN (SELECT id FROM inserted);
+END;
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+
+-- Procédures stockées pour alimenter les tables tampons
+-- À adapter selon votre structure Sage 100
+
+-- Procédure pour synchroniser les clients depuis les tables Sage 100
+CREATE PROCEDURE sp_sync_customers_to_buffer
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Insérer ou mettre à jour les clients dans la table tampon
+    -- Remplacez F_COMPTET par le nom réel de votre table clients Sage 100
+    MERGE sync_customers AS target
+    USING (
+        SELECT
+            CT_Num as sage_id,
+            CT_Intitule as company_name,
+            CT_Contact as contact_name,
+            CT_EMail as email,
+            CT_Telephone as phone,
+            CT_Adresse as address,
+            ISNULL(CT_DelaiPaiement, 30) as payment_delay,
+            'XOF' as currency,
+            CT_LimiteCredit as credit_limit,
+            CASE
+                WHEN CT_Sommeil = 0 THEN 1
+                ELSE 0
+            END as is_active
+        FROM F_COMPTET
+        WHERE CT_Type = 0  -- 0 = Client dans Sage
+    ) AS source ON target.sage_id = source.sage_id
+
+    WHEN MATCHED THEN
+        UPDATE SET
+            company_name = source.company_name,
+            contact_name = source.contact_name,
+            email = source.email,
+            phone = source.phone,
+            address = source.address,
+            payment_delay = source.payment_delay,
+            currency = source.currency,
+            credit_limit = source.credit_limit,
+            is_active = source.is_active,
+            synced = 0,  -- Marquer comme non synchronisé
+            updated_at = GETDATE()
+
+    WHEN NOT MATCHED THEN
+        INSERT (sage_id, company_name, contact_name, email, phone, address,
+                payment_delay, currency, credit_limit, is_active, synced)
+        VALUES (source.sage_id, source.company_name, source.contact_name,
+                source.email, source.phone, source.address, source.payment_delay,
+                source.currency, source.credit_limit, source.is_active, 0);
+
+    PRINT 'Synchronisation des clients terminée';
+END;
+
+-- Procédure pour synchroniser les factures depuis les tables Sage 100
+CREATE PROCEDURE sp_sync_invoices_to_buffer
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Insérer ou mettre à jour les factures dans la table tampon
+    -- Remplacez F_DOCENTETE par le nom réel de votre table factures Sage 100
+    MERGE sync_invoices AS target
+    USING (
+        SELECT
+            d.DO_Piece as sage_id,
+            d.DO_Piece as invoice_number,
+            d.DO_Tiers as customer_sage_id,
+            d.DO_Ref as reference,
+            CASE d.DO_Type
+                WHEN 0 THEN 'invoice'
+                WHEN 1 THEN 'credit_note'
+                ELSE 'invoice'
+            END as type,
+            d.DO_Date as invoice_date,
+            'XOF' as currency,
+            d.DO_TotalTTC as total_amount,
+            d.DO_Commentaire as notes
+        FROM F_DOCENTETE d
+        WHERE d.DO_Domaine = 0  -- 0 = Vente dans Sage
+          AND d.DO_Type IN (0, 1)  -- Factures et avoirs
+    ) AS source ON target.sage_id = source.sage_id
+
+    WHEN MATCHED THEN
+        UPDATE SET
+            invoice_number = source.invoice_number,
+            customer_sage_id = source.customer_sage_id,
+            reference = source.reference,
+            type = source.type,
+            invoice_date = source.invoice_date,
+            currency = source.currency,
+            total_amount = source.total_amount,
+            notes = source.notes,
+            synced = 0,  -- Marquer comme non synchronisé
+            updated_at = GETDATE()
+
+    WHEN NOT MATCHED THEN
+        INSERT (sage_id, invoice_number, customer_sage_id, reference, type,
+                invoice_date, currency, total_amount, notes, synced)
+        VALUES (source.sage_id, source.invoice_number, source.customer_sage_id,
+                source.reference, source.type, source.invoice_date, source.currency,
+                source.total_amount, source.notes, 0);
+
+    PRINT 'Synchronisation des factures terminée';
+END;
+
+-- Procédure pour synchroniser les échéances depuis les tables Sage 100
+CREATE PROCEDURE sp_sync_due_dates_to_buffer
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Insérer ou mettre à jour les échéances dans la table tampon
+    -- Remplacez F_ECHEANCIER par le nom réel de votre table échéances Sage 100
+    MERGE sync_due_dates AS target
+    USING (
+        SELECT
+            e.EC_Piece as invoice_sage_id,
+            e.EC_Echeance as due_date,
+            e.EC_Montant as amount
+        FROM F_ECHEANCIER e
+        INNER JOIN F_DOCENTETE d ON e.EC_Piece = d.DO_Piece
+        WHERE d.DO_Domaine = 0  -- Ventes uniquement
+    ) AS source ON target.invoice_sage_id = source.invoice_sage_id
+                AND target.due_date = source.due_date
+
+    WHEN MATCHED THEN
+        UPDATE SET
+            amount = source.amount,
+            synced = 0,  -- Marquer comme non synchronisé
+            updated_at = GETDATE()
+
+    WHEN NOT MATCHED THEN
+        INSERT (invoice_sage_id, due_date, amount, synced)
+        VALUES (source.invoice_sage_id, source.due_date, source.amount, 0);
+
+    PRINT 'Synchronisation des échéances terminée';
+END;
+
+-- Procédure pour exécuter toutes les synchronisations
+CREATE PROCEDURE sp_sync_all_to_buffer
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        EXEC sp_sync_customers_to_buffer;
+        EXEC sp_sync_invoices_to_buffer;
+        EXEC sp_sync_due_dates_to_buffer;
+
+        PRINT 'Synchronisation complète terminée avec succès';
+    END TRY
+    BEGIN CATCH
+        PRINT 'Erreur lors de la synchronisation: ' + ERROR_MESSAGE();
+        THROW;
+    END CATCH
+END;
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
