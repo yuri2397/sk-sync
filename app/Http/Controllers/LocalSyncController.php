@@ -21,7 +21,7 @@ class LocalSyncController extends Controller
     public function dumpInvoices(Request $request)
     {
         try {
-            $limit = (int)$request->input('limit', 10000);
+            $limit = (int)$request->input('limit', 1000);
             $fromDate = $request->input('from_date', '2024-10-10 00:00:00'); // Date d'échéance de référence
 
 
@@ -87,7 +87,10 @@ class LocalSyncController extends Controller
                     AND e.EC_Sens = 0           -- Débits (factures)
                     AND e.EC_Lettre = 0         -- NON LETTRÉES = Vraiment impayées
                     AND e.EC_RefPiece IS NOT NULL  -- Avec référence facture
-                    AND e.EC_Montant > 0        -- Montant positif
+                    AND f.DO_Date IS NOT NULL  -- Date de facture valide
+                    AND e.EC_Montant > 0       -- Montant positif
+                    AND f.Do_Piece IS NOT NULL
+                    AND f.DO_TotalTTC > 0       -- Total TTC valide
                     AND e.EC_Echeance >= ?      -- Date d'échéance à partir de la date définie
                     -- Exclure les factures déjà dans le buffer
                     AND NOT EXISTS (
@@ -244,6 +247,46 @@ class LocalSyncController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Erreur lors de la récupération des factures non synchronisées',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Marquer des factures comme synchronisées
+     */
+    public function markAsSynced(Request $request)
+    {
+        try {
+            $invoiceIds = $request->input('invoice_ids', []);
+            $notes = $request->input('notes', 'Synchronisé automatiquement');
+
+            if (empty($invoiceIds)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aucune facture spécifiée'
+                ], 400);
+            }
+
+            $updatedCount = InvoiceSyncBuffer::whereIn('id', $invoiceIds)
+                ->where('sync_status', 'pending')
+                ->update([
+                    'sync_status' => 'synced',
+                    'synced_at' => now(),
+                    'sync_notes' => $notes
+                ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => "{$updatedCount} facture(s) marquée(s) comme synchronisée(s)",
+                'updated_count' => $updatedCount
+            ]);
+        } catch (Exception $e) {
+            Log::error('Erreur marquage synchronisé: ' . $e->getMessage());
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Erreur lors du marquage des factures',
                 'error' => $e->getMessage()
             ], 500);
         }

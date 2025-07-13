@@ -2,6 +2,7 @@
 
 // routes/api.php - App Locale
 
+use App\Http\Controllers\HomeController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\LocalSyncController;
 
@@ -23,4 +24,7 @@ Route::prefix('sync')->group(function () {
 
     // 4. Statistiques
     Route::get('/stats', [LocalSyncController::class, 'getStats']);
+
+    // Marquer des factures comme synchronisées
+    Route::post('/mark-synced', [HomeController::class, 'markInvoicesAsSynced']);
 });
