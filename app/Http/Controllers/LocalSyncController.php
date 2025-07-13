@@ -117,7 +117,10 @@ class LocalSyncController extends Controller
             $addedCount = 0;
             $errors = [];
 
+            
+
             foreach ($invoices as $invoice) {
+                
                 try {
                     InvoiceSyncBuffer::create([
                         'invoice_number' => $invoice->invoice_number,
@@ -138,15 +141,16 @@ class LocalSyncController extends Controller
                         'priority' => $invoice->priority,
                         'source_entry_id' => $invoice->entry_id,
                         'description' => $invoice->description,
-                        'source_created_at' => $invoice->created_at ? date('Y-m-d H:i:s', strtotime($invoice->created_at)) : null,
-                        'source_updated_at' => $invoice->updated_at ? date('Y-m-d H:i:s', strtotime($invoice->updated_at)) : null,
+                        'source_created_at' => $invoice->created_at ? date('Y-d-m H:i:s', strtotime($invoice->created_at)) : null,
+                        'source_updated_at' => $invoice->updated_at ? date('Y-d-m H:i:s', strtotime($invoice->updated_at)) : null,
                     ]);
                     $addedCount++;
                 } catch (Exception $e) {
-                    $errors[] = "Erreur facture {$invoice->invoice_number}: ";
+                    $errors[] = "Erreur facture {$invoice->invoice_number}: " . $e->getMessage();
                 }
             }
 
+            
             return response()->json([
                 'success' => true,
                 'message' => "Dump terminé: {$addedCount} nouvelles factures ajoutées (échéances >= {$fromDate})",
@@ -154,7 +158,7 @@ class LocalSyncController extends Controller
                 'total_found' => count($invoices),
                 'from_date' => $fromDate,
                 'errors_count' => count($errors),
-                // 'errors' => $errors
+                'errors' => $errors
             ]);
         } catch (Exception $e) {
             Log::error('Erreur dump factures: ' . $e->getMessage());

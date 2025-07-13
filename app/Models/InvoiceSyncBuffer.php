@@ -67,6 +67,8 @@ class InvoiceSyncBuffer extends Model
     const PRIORITY_HIGH = 'HIGH';
     const PRIORITY_URGENT = 'URGENT';
 
+    public $timestamps = false;
+
     // Scopes pour faciliter les requêtes
     public function scopePending(Builder $query): Builder
     {

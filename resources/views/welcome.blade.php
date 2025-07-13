@@ -370,8 +370,8 @@
 
     <script>
         // Configuration
-        const API_BASE = 'http://localhost:8080/sk/public/api/sync';
-        const EXTERNAL_SYNC_URL = 'http://127.0.0.1:8000/api/sage-sync/receive-invoices'; // À configurer
+        const API_BASE = 'http://localhost:8080/sk/public/api/sync'; // laragon url
+        const EXTERNAL_SYNC_URL = 'https://sk-cloud-api-app.digita.sn/api/sage-sync/receive-invoices'; // À configurer
 
         // Éléments DOM
         const elements = {
