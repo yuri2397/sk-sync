@@ -509,7 +509,7 @@ class HomeController extends Controller
                 ->where('sync_status', 'pending')
                 ->update([
                     'sync_status' => 'synced',
-                    'synced_at' => now(),
+                    'synced_at' => date('Y-d-m H:m:s', now()->timestamp),
                     'sync_notes' => $notes
                 ]);
 

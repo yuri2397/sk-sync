@@ -22,7 +22,7 @@ class LocalSyncController extends Controller
     {
         try {
             $limit = (int)$request->input('limit', 1000);
-            $fromDate = $request->input('from_date', '2024-10-10 00:00:00'); // Date d'échéance de référence
+            $fromDate = $request->input('from_date', '2024-11-11 00:00:00'); // Date d'échéance de référence
 
 
             // Récupérer les factures depuis la base comptable qui ne sont pas encore dans le buffer
