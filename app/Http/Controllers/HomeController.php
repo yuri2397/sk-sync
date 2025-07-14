@@ -233,7 +233,7 @@ class HomeController extends Controller
     {
         try {
             $limit = (int)$request->input('limit', 1000);
-            $fromDate = $request->input('from_date', '2024-11-11 00:00:00');
+            $fromDate = $request->input('from_date', '2025-01-01 00:00:00');
 
             // Récupérer les factures depuis la base comptable qui ne sont pas encore dans le buffer
             $invoices = DB::select("
