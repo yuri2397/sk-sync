@@ -22,7 +22,7 @@ class LocalSyncController extends Controller
     {
         try {
             $limit = (int)$request->input('limit', 1000);
-            $fromDate = $request->input('from_date', '2024-11-11 00:00:00'); // Date d'échéance de référence
+            $fromDate = $request->input('from_date', '2020-11-11 00:00:00'); // Date d'échéance de référence
 
 
             // Récupérer les factures depuis la base comptable qui ne sont pas encore dans le buffer
@@ -92,6 +92,7 @@ class LocalSyncController extends Controller
                     AND f.Do_Piece IS NOT NULL
                     AND f.DO_TotalTTC > 0       -- Total TTC valide
                     AND e.EC_Echeance >= ?      -- Date d'échéance à partir de la date définie
+                    AND e.JM_Date >= '2025-01-01'
                     -- Exclure les factures déjà dans le buffer
                     AND NOT EXISTS (
                         SELECT 1 
@@ -112,15 +113,15 @@ class LocalSyncController extends Controller
                     e.EC_Montant DESC
 
                 OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY
-            ", [$fromDate,(int) $limit]);
+            ", [$fromDate, (int) $limit]);
 
             $addedCount = 0;
             $errors = [];
 
-            
+
 
             foreach ($invoices as $invoice) {
-                
+
                 try {
                     InvoiceSyncBuffer::create([
                         'invoice_number' => $invoice->invoice_number,
@@ -150,7 +151,7 @@ class LocalSyncController extends Controller
                 }
             }
 
-            
+
             return response()->json([
                 'success' => true,
                 'message' => "Dump terminé: {$addedCount} nouvelles factures ajoutées (échéances >= {$fromDate})",
